@@ -41,7 +41,13 @@ A device is any part of its name (case-insensitive) or its exact UID. If a name 
 
 Start with a low `--gain`. Output goes straight to the output device you chose.
 
-Options: `--gain 0..1` (default 1), `--buffer 32..512` frames (default 64, smaller is lower latency and uses more CPU), `--meter` (print input and output peaks once a second), `--map` (below).
+Options: `--gain 0..1` (default 1), `--buffer 32..512` frames (default 64, smaller is lower latency and uses more CPU), `--meter` (the full-screen meter, below), `--map` (below).
+
+## Meter
+
+`thru qc af --meter` takes over the terminal with a live meter for each mapped output channel: a bar from -60 to 0 dBFS, a peak-hold tick, a latching CLIP marker, and the level as a number. The bar is solid up to the RMS level and shaded up to the peak, so you can see average loudness and peaks together (RMS uses a 300 ms window).
+
+Keys: `q` quit, `c` clear clip markers, `i` show the input channels above the outputs, `m` turn RMS on or off. Events (lost, restored, unmuted, ...) appear in a small log under the bars instead of scrolling. Your scrollback comes back when you exit. Set `NO_COLOR=1` for no colors. If stdout isn't a terminal, `--meter` prints one `thru: meter in=... out=...` line a second instead.
 
 ## Choosing channels
 
@@ -121,7 +127,7 @@ Usage:
 Options:
   --buffer N  frames, default 64, clamped to 32...512
   --gain G    0...1, default 1
-  --meter     print in/out peaks once per second
+  --meter     full-screen peak and RMS meter (q quit, c clear clip, i inputs, m RMS); plain lines when not a terminal
   --no-wait   exit 2 immediately if device not found
 
 Channel Map SPEC:

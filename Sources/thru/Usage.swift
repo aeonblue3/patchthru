@@ -15,7 +15,7 @@ Usage:
 Options:
   --buffer N  frames, default 64, clamped to 32...512
   --gain G    0...1, default 1
-  --meter     print in/out peaks once per second
+  --meter     full-screen peak and RMS meter (q quit, c clear clip, i inputs, m RMS); plain lines when not a terminal
   --no-wait   exit 2 immediately if device not found
 
 Channel Map SPEC:
