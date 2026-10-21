@@ -28,13 +28,63 @@ private func padLeft(_ s: String, _ n: Int) -> String { s.count >= n ? fit(s, n)
 private func fraction(_ db: Double) -> Double { (min(0, max(meterFloorDB, db)) - meterFloorDB) / -meterFloorDB }
 private func dbText(_ db: Double) -> String { db <= meterFloorDB ? "-inf" : String(format: "%.1f", db) }
 
+private func paint(_ text: String, _ code: String?, _ on: Bool) -> String {
+    guard on, let code = code, !text.isEmpty else { return text }
+    return "\u{1B}[\(code)m\(text)\u{1B}[0m"
+}
+
+/// Plain text is cut to the width first, then each piece is styled, so colors never change the layout.
+private func styledLine(_ segments: [(String, String?)], width: Int, color: Bool) -> String {
+    var remaining = width
+    var out = ""
+    for (text, code) in segments {
+        guard remaining > 0 else { break }
+        let piece = fit(text, remaining)
+        out += paint(piece, code, color)
+        remaining -= piece.count
+    }
+    return out
+}
+
+/// Same thresholds as the bar cells, so a number and its bar agree. Silence is faint.
+private func levelCode(_ db: Double) -> String {
+    db <= meterFloorDB ? "2" : (db < -18 ? "32" : (db <= -6 ? "33" : "31"))
+}
+
+private func stateCode(_ state: String) -> String? {
+    switch state {
+    case "connected": return "1;32"
+    case "muted", "waiting": return "1;33"
+    case "rebuilding": return "1;35"
+    case "asleep": return "1;36"
+    default: return nil
+    }
+}
+
+private func eventCode(_ message: String) -> String? {
+    let m = message.lowercased()
+    if m.contains("lost") || m.contains("could not") || m.contains("differ") { return "31" }
+    if m.contains("waiting") || m.contains("rebuilding") || m.contains("sleeping") { return "33" }
+    if m.contains("restored") || m.contains("unmuted") || m.contains("connected") || m.contains("woke") || m.contains("found") { return "32" }
+    return nil
+}
+
+private func eventLine(_ event: String, width: Int, color: Bool) -> String {
+    // Events arrive as "HH:mm:ss message"; the timestamp is faint and the message is colored by meaning.
+    if event.count > 9, event[event.index(event.startIndex, offsetBy: 2)] == ":" {
+        let stamp = String(event.prefix(8)), message = String(event.dropFirst(9))
+        return styledLine([("  ", nil), (stamp, "2"), (" ", nil), (message, eventCode(message))], width: width, color: color)
+    }
+    return styledLine([("  ", nil), (event, eventCode(event))], width: width, color: color)
+}
+
 /// Green below -18 dB, yellow up to -6 dB, red above, by the cell's own level.
 private func cellColor(_ index: Int, of cells: Int) -> String {
     let top = meterFloorDB + Double(index + 1) / Double(cells) * -meterFloorDB
     return top < -18 ? "32" : (top <= -6 ? "33" : "31")
 }
 
-private func meterRow(label: String, db: Double, hold: Double, clip: Bool, cells: Int, color: Bool) -> String {
+private func meterRow(label: String, db: Double, hold: Double, clip: Bool, isInput: Bool, cells: Int, color: Bool) -> String {
     let filled = Int((fraction(db) * Double(cells)).rounded())
     let holdCell: Int? = hold > meterFloorDB ? min(cells - 1, max(0, Int((fraction(hold) * Double(cells)).rounded()) - 1)) : nil
     var bar = ""
@@ -46,9 +96,11 @@ private func meterRow(label: String, db: Double, hold: Double, clip: Bool, cells
             bar += glyph
         }
     }
-    let readout = " " + padLeft(dbText(db), 6) + " dB" + " hold " + padLeft(dbText(hold), 5)
-    let clipText = clip ? (color ? "\u{1B}[31m CLIP \u{1B}[0m" : " CLIP ") : String(repeating: " ", count: clipColumn)
-    return " " + padRight(label, 7) + " " + bar + padRight(readout, readoutColumn) + clipText
+    // 21 columns: space + 6-wide level + " dB" + " hold " + 5-wide hold level. Numbers take the color of their level.
+    let readout = " " + paint(padLeft(dbText(db), 6), levelCode(db), color) + paint(" dB", "2", color)
+        + paint(" hold ", "2", color) + paint(padLeft(dbText(hold), 5), levelCode(hold), color)
+    let clipText = clip ? (color ? "\u{1B}[1;97;41m CLIP \u{1B}[0m" : " CLIP ") : String(repeating: " ", count: clipColumn)
+    return " " + paint(padRight(label, 7), isInput ? "2" : "1", color) + " " + bar + readout + clipText
 }
 
 private func scaleRow(width: Int, cells: Int) -> String {
@@ -68,22 +120,24 @@ private func scaleRow(width: Int, cells: Int) -> String {
 func renderMeter(_ f: MeterFrame, width: Int, height: Int) -> [String] {
     guard width >= 50, height >= 10 else { return ["terminal too small (need 50x10)"] }
     let cells = width - labelColumn - readoutColumn - clipColumn
-    let rule = String(repeating: "─", count: width)
+    let rule = paint(String(repeating: "─", count: width), "2", f.color)
     let outs = min(f.outLabels.count, f.outDB.count, f.outHoldDB.count)
     let ins = f.showInputs ? min(f.inLabels.count, f.inDB.count, f.inHoldDB.count) : 0
 
-    let header = fit(" patchthru   \(f.route)    \(f.detail)", width)
+    let header = styledLine([(" ", nil), ("patchthru", "1;36"), ("   ", nil), (f.route, "1"), ("    ", nil), (f.detail, "36")], width: width, color: f.color)
     var inputRows = (0..<ins).map {
-        meterRow(label: f.inLabels[$0], db: f.inDB[$0], hold: f.inHoldDB[$0], clip: false, cells: cells, color: f.color)
+        meterRow(label: f.inLabels[$0], db: f.inDB[$0], hold: f.inHoldDB[$0], clip: false, isInput: true, cells: cells, color: f.color)
     }
     let outputRows = (0..<outs).map {
         meterRow(label: f.outLabels[$0], db: f.outDB[$0], hold: f.outHoldDB[$0],
-                 clip: $0 < f.outClip.count ? f.outClip[$0] : false, cells: cells, color: f.color)
+                 clip: $0 < f.outClip.count ? f.outClip[$0] : false, isInput: false, cells: cells, color: f.color)
     }
-    var scale: String? = scaleRow(width: width, cells: cells)
-    var events = f.events.suffix(3).map { fit("  " + $0, width) }
-    var help: String? = fit(" q quit   c clear clip   i inputs on/off", width)
-    let state = fit(" " + f.state, width)
+    var scale: String? = paint(scaleRow(width: width, cells: cells), "2", f.color)
+    var events = f.events.suffix(3).map { eventLine($0, width: width, color: f.color) }
+    let key = "1;30;46"   // bold black on cyan: the key itself, layout unchanged
+    var help: String? = styledLine([(" ", nil), ("q", key), (" quit   ", nil), ("c", key), (" clear clip   ", nil), ("i", key), (" inputs on/off", nil)],
+                                   width: width, color: f.color)
+    let state = styledLine([(" ", nil), (f.state, stateCode(f.state))], width: width, color: f.color)
 
     func total() -> Int {
         2 + inputRows.count + outputRows.count + (scale == nil ? 0 : 1) + 1 + 1 + events.count + (help == nil ? 0 : 1)

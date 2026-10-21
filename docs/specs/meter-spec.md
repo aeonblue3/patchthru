@@ -44,3 +44,11 @@ Bar: `█` for filled cells, `░` for empty; filled = round((clamp(dB, -60, 0) 
 
 ## Testing aid
 `thru meter-snapshot <width> <height> <outDB,outDB,...> [--inputs <inDB,...>] [--color]` prints one rendered frame for synthetic levels (holds equal the levels, no clip unless a level is >= 0). Labels `OUT 1..n` and `IN 1..n`, route `A → B`, detail `map test`, state `connected`, one event `12:00:00 test`. Exit 0. Not in the usage text.
+
+## Colors (only when `color` is true; `NO_COLOR` turns them all off, and colors never change the layout)
+- Header: `patchthru` bold cyan, the route bold, the config detail cyan.
+- dB readouts and hold numbers take the color of their level, using the same thresholds as the bar cells: green below -18 dB, yellow from -18 to -6 dB, red above -6 dB. Silence (`-inf`) and the `dB` / `hold` words are faint.
+- Rows: output labels bold, input labels faint. Rules and the scale row are faint. `CLIP` is bold white on red.
+- State word: `connected` bold green, `muted` and `waiting` bold yellow, `rebuilding` bold magenta, `asleep` bold cyan.
+- Events: the timestamp is faint; the message is red for loss and failures (`lost`, `could not`, `differ`), yellow for `waiting`, `rebuilding`, `sleeping`, green for `restored`, `unmuted`, `connected`, `woke`, `found`.
+- Key legend: each key letter (`q`, `c`, `i`) is black on a cyan background, the rest of the legend is plain.
