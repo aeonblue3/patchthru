@@ -13,12 +13,17 @@ struct RouteConfig: Codable {
     private enum CodingKeys: String, CodingKey { case inputText, outputText, map, buffer, gain }
 }
 
+/// While the full-screen meter owns the terminal, events go to its event area instead of scrolling the screen.
+var eventSink: ((String) -> Void)?
+
 func say(_ line: String) {
+    if let sink = eventSink { sink(line); return }
     print("thru: \(line)")
     fflush(stdout)
 }
 
 func fail(_ line: String, code: Int32) -> Never {
+    Term.restore()   // the message must land on the real screen, not the meter's
     FileHandle.standardError.write(Data("thru: \(line)\n".utf8))
     exit(code)
 }
@@ -78,6 +83,7 @@ final class Router {
     private var timer: DispatchSourceTimer?
     private var sigSources: [DispatchSourceSignal] = []
     private var power: PowerWatcher?
+    private var ui: MeterUI?
 
     init(_ cfg: RouteConfig) {
         var c = cfg
@@ -94,6 +100,13 @@ final class Router {
             src.resume()
             sigSources.append(src)
         }
+        if cfg.meter && Term.isInteractive {
+            let u = MeterUI(engine: { [weak self] in self?.engine }, quit: { [weak self] in self?.stop() },
+                            route: "\(cfg.inputText) → \(cfg.outputText)")
+            u.start()
+            ui = u
+            eventSink = { [weak u] line in u?.addEvent(line) }
+        }
         power = PowerWatcher(onSleep: { [weak self] in self?.sleeping() }, onWake: { [weak self] in self?.woke() })
         power?.start()
         attempt()
@@ -106,6 +119,8 @@ final class Router {
     }
 
     private func stop() {
+        eventSink = nil
+        ui?.shutdown()   // restore the terminal before the final line is printed
         engine?.teardown()
         say("stopped")
         exit(0)
@@ -114,6 +129,7 @@ final class Router {
     private func sleeping() {
         guard !asleep else { return }
         asleep = true
+        ui?.setState("asleep")
         sleptWall = Date().timeIntervalSince1970
         sleptUp = DispatchTime.now().uptimeNanoseconds
         engine?.teardown()
@@ -128,10 +144,12 @@ final class Router {
         present = [:]
         rateComplaint = ""
         lastFailure = ""
+        ui?.setState("waiting")
         say("woke")
     }
 
     private func rebuild(_ reason: String) {
+        ui?.setState("rebuilding")
         say("rebuilding (\(reason))")
         engine?.teardown()
         engine = nil
@@ -190,14 +208,16 @@ final class Router {
         if !healthy && !muted {
             engine.setAllow(false)
             muted = true
+            ui?.setState("muted")
         } else if healthy && muted && goodTicks >= holdoffTicks {
             engine.setAllow(true)
             muted = false
+            ui?.setState("connected")
             layoutRebuilds = 0
             say("unmuted")
         }
 
-        if cfg.meter && ticks % 10 == 0 {
+        if cfg.meter && ui == nil && ticks % 10 == 0 {
             let p = engine.takePeaks()
             say(String(format: "meter in=%.4f out=%.4f", p.input, p.output))
         }
@@ -219,6 +239,7 @@ final class Router {
             return nil
         case .none:
             if cfg.noWait && !everConnected { fail("no \(needInput ? "input" : "output") device matches \(shown)", code: 2) }
+            ui?.setState("waiting")
             if announcedWaiting.insert(text).inserted { say("waiting for '\(text)'") }
             return nil
         }
@@ -282,6 +303,10 @@ final class Router {
             buildFailures = 0
             lastFailure = ""
             let ms = Int(Double(e.firstCallTicks &- started) * Double(tb.numer) / Double(tb.denom) / 1_000_000)
+            ui?.connected(route: "\(i.name) → \(o.name)",
+                          detail: "map \(map.spec)   \(cfg.buffer) frames   gain \(String(format: "%.2f", cfg.gain))",
+                          outChannels: map.pairs.map { $0.output }, inChannels: map.pairs.map { $0.input })
+            ui?.setState(muted ? "muted" : "connected")
             say("connected \(i.name) -> \(o.name) map=\(map.spec) buffer=\(cfg.buffer) first-audio=\(ms)ms")
             if pinnedSpec == nil {   // save once: a rebuild must never overwrite the route with a re-guessed map
                 pinnedSpec = map.spec

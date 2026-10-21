@@ -140,6 +140,30 @@ func aliasCommand(_ rest: [String]) {
     }
 }
 
+/// Testing aid: render one meter frame for synthetic levels.
+func meterSnapshot(_ rest: [String]) {
+    var args = rest
+    guard args.count >= 3, let w = Int(args[0]), let h = Int(args[1]) else { usageAndExit(1) }
+    func levels(_ s: String) -> [Double] { s.split(separator: ",").compactMap { Double($0) } }
+    let out = levels(args[2])
+    args.removeFirst(3)
+    var ins: [Double] = []
+    var color = false
+    var k = 0
+    while k < args.count {
+        if args[k] == "--inputs", k + 1 < args.count { ins = levels(args[k + 1]); k += 1 }
+        else if args[k] == "--color" { color = true }
+        else { usageAndExit(1) }
+        k += 1
+    }
+    let f = MeterFrame(
+        route: "A → B", detail: "map test",
+        outLabels: out.indices.map { "OUT \($0 + 1)" }, outDB: out, outHoldDB: out, outClip: out.map { $0 >= 0 },
+        inLabels: ins.indices.map { "IN \($0 + 1)" }, inDB: ins, inHoldDB: ins,
+        showInputs: !ins.isEmpty, state: "connected", events: ["12:00:00 test"], color: color)
+    print(renderMeter(f, width: w, height: h).joined(separator: "\n"))
+}
+
 // ---- dispatch
 if let first = args.first {
     switch first {
@@ -153,6 +177,9 @@ if let first = args.first {
     case "inspect":
         guard args.count >= 2 else { usageAndExit(1) }
         inspect(args[1])
+        exit(0)
+    case "meter-snapshot":
+        meterSnapshot(Array(args.dropFirst()))
         exit(0)
     case "alias":
         aliasCommand(Array(args.dropFirst()))

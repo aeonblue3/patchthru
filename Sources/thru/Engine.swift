@@ -9,8 +9,8 @@ struct RTState {
     var valid: Int32 = 0
     var faults: UInt32 = 0   // counts every invalid cycle, so a blip shorter than one supervisor tick is still seen
     var allow: Int32 = 1   // 0 = hold output muted (set by the main queue after a loss, until audio is trustworthy again)
-    var inPeak: Float = 0
-    var outPeak: Float = 0
+    var inPeaks: UnsafeMutablePointer<Float>    // per mapped pair, since the last takeChannelPeaks()
+    var outPeaks: UnsafeMutablePointer<Float>
     var gainCur: Float = 0
     var rampStep: Float = 0
     var master: Float = 1
@@ -58,7 +58,7 @@ private let thruIOProc: AudioDeviceIOProc = { _, _, inData, _, outData, _, clien
     let step = s.pointee.rampStep, master = s.pointee.master
     let n = s.pointee.pairCount
     let inCh = s.pointee.inCh, outCh = s.pointee.outCh
-    var inPeak: Float = 0, outPeak: Float = 0
+    let inPeaks = s.pointee.inPeaks, outPeaks = s.pointee.outPeaks
     for f in 0..<frames {
         if g < 1 { g = min(1, g + step) }
         let gg = g * master
@@ -67,13 +67,11 @@ private let thruIOProc: AudioDeviceIOProc = { _, _, inData, _, outData, _, clien
             let y = x * gg
             op[f * wantOut + outCh[k]] = y
             let ax = abs(x), ay = abs(y)
-            if ax > inPeak { inPeak = ax }
-            if ay > outPeak { outPeak = ay }
+            if ax > inPeaks[k] { inPeaks[k] = ax }
+            if ay > outPeaks[k] { outPeaks[k] = ay }
         }
     }
     s.pointee.gainCur = g
-    if inPeak > s.pointee.inPeak { s.pointee.inPeak = inPeak }
-    if outPeak > s.pointee.outPeak { s.pointee.outPeak = outPeak }
     return noErr
 }
 
@@ -93,12 +91,21 @@ final class Engine {
     /// Mute (false) or release (true) the output. Releasing restarts the ~50 ms fade-in from silence.
     func setAllow(_ on: Bool) { rt.pointee.allow = on ? 1 : 0 }
 
-    /// Peaks since the last call (racy by design; used for the meter only).
+    /// Per-channel peaks (linear, 0...1) of the mapped input and output channels since the last call.
+    /// Racy by design: a peak landing during the reset can be lost, which only matters for a meter.
+    func takeChannelPeaks() -> (inputs: [Float], outputs: [Float]) {
+        let n = rt.pointee.pairCount
+        let ins = (0..<n).map { rt.pointee.inPeaks[$0] }
+        let outs = (0..<n).map { rt.pointee.outPeaks[$0] }
+        rt.pointee.inPeaks.update(repeating: 0, count: n)
+        rt.pointee.outPeaks.update(repeating: 0, count: n)
+        return (ins, outs)
+    }
+
+    /// Largest input and output peak across channels since the last call (for the one-line meter).
     func takePeaks() -> (input: Float, output: Float) {
-        let p = (rt.pointee.inPeak, rt.pointee.outPeak)
-        rt.pointee.inPeak = 0
-        rt.pointee.outPeak = 0
-        return p
+        let p = takeChannelPeaks()
+        return (p.inputs.max() ?? 0, p.outputs.max() ?? 0)
     }
 
     init(input: AudioDevice, output: AudioDevice, map: ChannelMap, buffer: UInt32, gain: Float, allow: Bool = true) throws {
@@ -122,8 +129,12 @@ final class Engine {
         let inCh = UnsafeMutablePointer<Int>.allocate(capacity: n)
         let outCh = UnsafeMutablePointer<Int>.allocate(capacity: n)
         for (i, p) in map.pairs.enumerated() { inCh[i] = p.input; outCh[i] = p.output }
+        let inPeaks = UnsafeMutablePointer<Float>.allocate(capacity: n)
+        let outPeaks = UnsafeMutablePointer<Float>.allocate(capacity: n)
+        inPeaks.initialize(repeating: 0, count: n)
+        outPeaks.initialize(repeating: 0, count: n)
         rt = UnsafeMutablePointer<RTState>.allocate(capacity: 1)
-        rt.initialize(to: RTState(inCh: inCh, outCh: outCh))
+        rt.initialize(to: RTState(inPeaks: inPeaks, outPeaks: outPeaks, inCh: inCh, outCh: outCh))
         rt.pointee.pairCount = n
         rt.pointee.wantIn = wantIn
         rt.pointee.wantOut = wantOut
@@ -182,6 +193,8 @@ final class Engine {
         if !freed {
             rt.pointee.inCh.deallocate()
             rt.pointee.outCh.deallocate()
+            rt.pointee.inPeaks.deallocate()
+            rt.pointee.outPeaks.deallocate()
             rt.deinitialize(count: 1)
             rt.deallocate()
             freed = true
