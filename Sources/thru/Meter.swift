@@ -10,8 +10,12 @@ struct MeterChannel {
     var hold = -120.0
     var holdAge = 0.0
     var clip = false
+    var meanSq = 0.0      // smoothed mean square (300 ms time constant)
+    var rms: Double { meanSq <= 1e-12 ? -120 : 10 * log10(meanSq) }
 
-    mutating func update(peak: Float, dt: Double, detectClip: Bool) {
+    mutating func update(peak: Float, meanSq now: Float, hasFrames: Bool, dt: Double, detectClip: Bool) {
+        let alpha = 1 - exp(-dt / 0.3)
+        meanSq += alpha * ((hasFrames ? Double(now) : 0) - meanSq)
         let db = linearToDB(peak)
         level = max(db, level - 24 * dt)
         if db >= hold {
@@ -42,6 +46,7 @@ final class MeterUI {
     private var inLabels: [String] = []
     private var events: [String] = []
     private var showInputs = false
+    private var showRMS = true
     private var lastSize = (width: 0, height: 0)
     private var lastFrame = DispatchTime.now()
     private var timer: DispatchSourceTimer?
@@ -109,6 +114,7 @@ final class MeterUI {
                 for i in outputs.indices { outputs[i].clear() }
                 for i in inputs.indices { inputs[i].clear() }
             case UInt8(ascii: "i"), UInt8(ascii: "I"): showInputs.toggle()
+            case UInt8(ascii: "m"), UInt8(ascii: "M"): showRMS.toggle()
             default: break
             }
         }
@@ -118,9 +124,11 @@ final class MeterUI {
         let now = DispatchTime.now()
         let dt = min(0.25, Double(now.uptimeNanoseconds &- lastFrame.uptimeNanoseconds) / 1e9)
         lastFrame = now
-        let peaks = engine()?.takeChannelPeaks() ?? (inputs: [], outputs: [])
-        for i in outputs.indices { outputs[i].update(peak: i < peaks.outputs.count ? peaks.outputs[i] : 0, dt: dt, detectClip: true) }
-        for i in inputs.indices { inputs[i].update(peak: i < peaks.inputs.count ? peaks.inputs[i] : 0, dt: dt, detectClip: false) }
+        let lv = engine()?.takeLevels()
+        let has = (lv?.frames ?? 0) > 0
+        func pick(_ a: [Float]?, _ i: Int) -> Float { (a != nil && i < a!.count) ? a![i] : 0 }
+        for i in outputs.indices { outputs[i].update(peak: pick(lv?.outPeaks, i), meanSq: pick(lv?.outMeanSq, i), hasFrames: has, dt: dt, detectClip: true) }
+        for i in inputs.indices { inputs[i].update(peak: pick(lv?.inPeaks, i), meanSq: pick(lv?.inMeanSq, i), hasFrames: has, dt: dt, detectClip: false) }
 
         let size = Term.size()
         if size != lastSize { Term.clear(); lastSize = size }
@@ -128,6 +136,7 @@ final class MeterUI {
             route: route, detail: detail,
             outLabels: outLabels, outDB: outputs.map { $0.level }, outHoldDB: outputs.map { $0.hold }, outClip: outputs.map { $0.clip },
             inLabels: inLabels, inDB: inputs.map { $0.level }, inHoldDB: inputs.map { $0.hold },
+            outRMSDB: outputs.map { $0.rms }, inRMSDB: inputs.map { $0.rms }, showRMS: showRMS,
             showInputs: showInputs, state: state, events: events,
             color: ProcessInfo.processInfo.environment["NO_COLOR"] == nil)
         Term.draw(renderMeter(f, width: size.width, height: size.height), height: size.height)

@@ -11,6 +11,9 @@ struct RTState {
     var allow: Int32 = 1   // 0 = hold output muted (set by the main queue after a loss, until audio is trustworthy again)
     var inPeaks: UnsafeMutablePointer<Float>    // per mapped pair, since the last takeChannelPeaks()
     var outPeaks: UnsafeMutablePointer<Float>
+    var inSq: UnsafeMutablePointer<Float>       // running sum of squares per mapped pair, for RMS
+    var outSq: UnsafeMutablePointer<Float>
+    var sqFrames: UInt64 = 0                    // frames accumulated into the sums above
     var gainCur: Float = 0
     var rampStep: Float = 0
     var master: Float = 1
@@ -59,6 +62,7 @@ private let thruIOProc: AudioDeviceIOProc = { _, _, inData, _, outData, _, clien
     let n = s.pointee.pairCount
     let inCh = s.pointee.inCh, outCh = s.pointee.outCh
     let inPeaks = s.pointee.inPeaks, outPeaks = s.pointee.outPeaks
+    let inSq = s.pointee.inSq, outSq = s.pointee.outSq
     for f in 0..<frames {
         if g < 1 { g = min(1, g + step) }
         let gg = g * master
@@ -69,9 +73,12 @@ private let thruIOProc: AudioDeviceIOProc = { _, _, inData, _, outData, _, clien
             let ax = abs(x), ay = abs(y)
             if ax > inPeaks[k] { inPeaks[k] = ax }
             if ay > outPeaks[k] { outPeaks[k] = ay }
+            inSq[k] += x * x
+            outSq[k] += y * y
         }
     }
     s.pointee.gainCur = g
+    s.pointee.sqFrames &+= UInt64(frames)
     return noErr
 }
 
@@ -91,21 +98,38 @@ final class Engine {
     /// Mute (false) or release (true) the output. Releasing restarts the ~50 ms fade-in from silence.
     func setAllow(_ on: Bool) { rt.pointee.allow = on ? 1 : 0 }
 
-    /// Per-channel peaks (linear, 0...1) of the mapped input and output channels since the last call.
-    /// Racy by design: a peak landing during the reset can be lost, which only matters for a meter.
-    func takeChannelPeaks() -> (inputs: [Float], outputs: [Float]) {
+    /// Levels of the mapped channels since the last call: linear peaks, and mean squares for RMS.
+    /// Racy by design: a sample landing during the reset can be lost, which only matters for a meter.
+    struct Levels {
+        var inPeaks: [Float]
+        var outPeaks: [Float]
+        var inMeanSq: [Float]
+        var outMeanSq: [Float]
+        var frames: UInt64
+    }
+
+    func takeLevels() -> Levels {
         let n = rt.pointee.pairCount
-        let ins = (0..<n).map { rt.pointee.inPeaks[$0] }
-        let outs = (0..<n).map { rt.pointee.outPeaks[$0] }
+        let frames = rt.pointee.sqFrames
+        let div = Float(max(1, frames))
+        let l = Levels(
+            inPeaks: (0..<n).map { rt.pointee.inPeaks[$0] },
+            outPeaks: (0..<n).map { rt.pointee.outPeaks[$0] },
+            inMeanSq: (0..<n).map { rt.pointee.inSq[$0] / div },
+            outMeanSq: (0..<n).map { rt.pointee.outSq[$0] / div },
+            frames: frames)
         rt.pointee.inPeaks.update(repeating: 0, count: n)
         rt.pointee.outPeaks.update(repeating: 0, count: n)
-        return (ins, outs)
+        rt.pointee.inSq.update(repeating: 0, count: n)
+        rt.pointee.outSq.update(repeating: 0, count: n)
+        rt.pointee.sqFrames = 0
+        return l
     }
 
     /// Largest input and output peak across channels since the last call (for the one-line meter).
     func takePeaks() -> (input: Float, output: Float) {
-        let p = takeChannelPeaks()
-        return (p.inputs.max() ?? 0, p.outputs.max() ?? 0)
+        let l = takeLevels()
+        return (l.inPeaks.max() ?? 0, l.outPeaks.max() ?? 0)
     }
 
     init(input: AudioDevice, output: AudioDevice, map: ChannelMap, buffer: UInt32, gain: Float, allow: Bool = true) throws {
@@ -133,8 +157,12 @@ final class Engine {
         let outPeaks = UnsafeMutablePointer<Float>.allocate(capacity: n)
         inPeaks.initialize(repeating: 0, count: n)
         outPeaks.initialize(repeating: 0, count: n)
+        let inSq = UnsafeMutablePointer<Float>.allocate(capacity: n)
+        let outSq = UnsafeMutablePointer<Float>.allocate(capacity: n)
+        inSq.initialize(repeating: 0, count: n)
+        outSq.initialize(repeating: 0, count: n)
         rt = UnsafeMutablePointer<RTState>.allocate(capacity: 1)
-        rt.initialize(to: RTState(inPeaks: inPeaks, outPeaks: outPeaks, inCh: inCh, outCh: outCh))
+        rt.initialize(to: RTState(inPeaks: inPeaks, outPeaks: outPeaks, inSq: inSq, outSq: outSq, inCh: inCh, outCh: outCh))
         rt.pointee.pairCount = n
         rt.pointee.wantIn = wantIn
         rt.pointee.wantOut = wantOut
@@ -195,6 +223,8 @@ final class Engine {
             rt.pointee.outCh.deallocate()
             rt.pointee.inPeaks.deallocate()
             rt.pointee.outPeaks.deallocate()
+            rt.pointee.inSq.deallocate()
+            rt.pointee.outSq.deallocate()
             rt.deinitialize(count: 1)
             rt.deallocate()
             freed = true

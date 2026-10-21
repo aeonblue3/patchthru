@@ -11,6 +11,9 @@ struct MeterFrame {
     var inLabels: [String] = []
     var inDB: [Double] = []
     var inHoldDB: [Double] = []
+    var outRMSDB: [Double] = []      // empty = no RMS data: peak-only rows
+    var inRMSDB: [Double] = []
+    var showRMS: Bool = false
     var showInputs: Bool = false
     var state: String = ""
     var events: [String] = []
@@ -84,24 +87,36 @@ private func cellColor(_ index: Int, of cells: Int) -> String {
     return top < -18 ? "32" : (top <= -6 ? "33" : "31")
 }
 
-private func meterRow(label: String, db: Double, hold: Double, clip: Bool, isInput: Bool, cells: Int, color: Bool) -> String {
+private func meterRow(label: String, db: Double, hold: Double, rms: Double?, clip: Bool, isInput: Bool, cells: Int, color: Bool) -> String {
     let filled = Int((fraction(db) * Double(cells)).rounded())
+    let rmsFilled = rms.map { Int((fraction($0) * Double(cells)).rounded()) }
     let holdCell: Int? = hold > meterFloorDB ? min(cells - 1, max(0, Int((fraction(hold) * Double(cells)).rounded()) - 1)) : nil
     var bar = ""
     for i in 0..<cells {
-        let glyph = i == holdCell ? "┃" : (i < filled ? "█" : "░")
-        if color && (i < filled || i == holdCell) {
+        // With RMS: solid up to the RMS level, medium shade up to the peak level, light beyond.
+        let solid = rmsFilled.map { i < $0 } ?? (i < filled)
+        let body = i < filled || solid
+        let glyph = i == holdCell ? "┃" : (solid ? "█" : (i < filled ? (rmsFilled == nil ? "█" : "▒") : "░"))
+        if color && (body || i == holdCell) {
             bar += "\u{1B}[\(cellColor(i, of: cells))m\(glyph)\u{1B}[0m"
         } else {
             bar += glyph
         }
     }
     // 21 columns: space + 6-wide level + " dB" + " hold " + 5-wide hold level. Numbers take the color of their level.
-    let readout = " " + paint(padLeft(dbText(db), 6), levelCode(db), color) + paint(" dB", "2", color)
-        + paint(" hold ", "2", color) + paint(padLeft(dbText(hold), 5), levelCode(hold), color)
+    let readout: String
+    if let r = rms {   // peak and RMS, still 21 columns; the hold tick on the bar replaces the hold number
+        readout = " " + paint(padLeft(dbText(db), 6), levelCode(db), color) + paint(" dB", "2", color)
+            + paint("  rms ", "2", color) + paint(padLeft(dbText(r), 5), levelCode(r), color)
+    } else {
+        readout = " " + paint(padLeft(dbText(db), 6), levelCode(db), color) + paint(" dB", "2", color)
+            + paint(" hold ", "2", color) + paint(padLeft(dbText(hold), 5), levelCode(hold), color)
+    }
     let clipText = clip ? (color ? "\u{1B}[1;97;41m CLIP \u{1B}[0m" : " CLIP ") : String(repeating: " ", count: clipColumn)
     return " " + paint(padRight(label, 7), isInput ? "2" : "1", color) + " " + bar + readout + clipText
 }
+
+private func rmsFor(_ on: Bool, _ values: [Double], _ i: Int) -> Double? { on && i < values.count ? values[i] : nil }
 
 private func scaleRow(width: Int, cells: Int) -> String {
     var chars = Array(repeating: Character(" "), count: width)
@@ -126,16 +141,16 @@ func renderMeter(_ f: MeterFrame, width: Int, height: Int) -> [String] {
 
     let header = styledLine([(" ", nil), ("patchthru", "1;36"), ("   ", nil), (f.route, "1"), ("    ", nil), (f.detail, "36")], width: width, color: f.color)
     var inputRows = (0..<ins).map {
-        meterRow(label: f.inLabels[$0], db: f.inDB[$0], hold: f.inHoldDB[$0], clip: false, isInput: true, cells: cells, color: f.color)
+        meterRow(label: f.inLabels[$0], db: f.inDB[$0], hold: f.inHoldDB[$0], rms: rmsFor(f.showRMS, f.inRMSDB, $0), clip: false, isInput: true, cells: cells, color: f.color)
     }
     let outputRows = (0..<outs).map {
-        meterRow(label: f.outLabels[$0], db: f.outDB[$0], hold: f.outHoldDB[$0],
+        meterRow(label: f.outLabels[$0], db: f.outDB[$0], hold: f.outHoldDB[$0], rms: rmsFor(f.showRMS, f.outRMSDB, $0),
                  clip: $0 < f.outClip.count ? f.outClip[$0] : false, isInput: false, cells: cells, color: f.color)
     }
     var scale: String? = paint(scaleRow(width: width, cells: cells), "2", f.color)
     var events = f.events.suffix(3).map { eventLine($0, width: width, color: f.color) }
     let key = "1;30;46"   // bold black on cyan: the key itself, layout unchanged
-    var help: String? = styledLine([(" ", nil), ("q", key), (" quit   ", nil), ("c", key), (" clear clip   ", nil), ("i", key), (" inputs on/off", nil)],
+    var help: String? = styledLine([(" ", nil), ("q", key), (" quit   ", nil), ("c", key), (" clear clip   ", nil), ("i", key), (" inputs on/off   ", nil), ("m", key), (" rms on/off", nil)],
                                    width: width, color: f.color)
     let state = styledLine([(" ", nil), (f.state, stateCode(f.state))], width: width, color: f.color)
 

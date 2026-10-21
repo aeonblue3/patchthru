@@ -148,10 +148,14 @@ func meterSnapshot(_ rest: [String]) {
     let out = levels(args[2])
     args.removeFirst(3)
     var ins: [Double] = []
+    var outRMS: [Double] = []
+    var inRMS: [Double] = []
     var color = false
     var k = 0
     while k < args.count {
         if args[k] == "--inputs", k + 1 < args.count { ins = levels(args[k + 1]); k += 1 }
+        else if args[k] == "--rms", k + 1 < args.count { outRMS = levels(args[k + 1]); k += 1 }
+        else if args[k] == "--in-rms", k + 1 < args.count { inRMS = levels(args[k + 1]); k += 1 }
         else if args[k] == "--color" { color = true }
         else { usageAndExit(1) }
         k += 1
@@ -160,6 +164,7 @@ func meterSnapshot(_ rest: [String]) {
         route: "A → B", detail: "map test",
         outLabels: out.indices.map { "OUT \($0 + 1)" }, outDB: out, outHoldDB: out, outClip: out.map { $0 >= 0 },
         inLabels: ins.indices.map { "IN \($0 + 1)" }, inDB: ins, inHoldDB: ins,
+        outRMSDB: outRMS, inRMSDB: inRMS, showRMS: !outRMS.isEmpty || !inRMS.isEmpty,
         showInputs: !ins.isEmpty, state: "connected", events: ["12:00:00 test"], color: color)
     print(renderMeter(f, width: w, height: h).joined(separator: "\n"))
 }

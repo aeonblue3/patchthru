@@ -52,3 +52,10 @@ Bar: `█` for filled cells, `░` for empty; filled = round((clamp(dB, -60, 0) 
 - State word: `connected` bold green, `muted` and `waiting` bold yellow, `rebuilding` bold magenta, `asleep` bold cyan.
 - Events: the timestamp is faint; the message is red for loss and failures (`lost`, `could not`, `differ`), yellow for `waiting`, `rebuilding`, `sleeping`, green for `restored`, `unmuted`, `connected`, `woke`, `found`.
 - Key legend: each key letter (`q`, `c`, `i`) is black on a cyan background, the rest of the legend is plain.
+
+## RMS (peak + RMS bars)
+- The audio callback keeps a running sum of squares per mapped channel (post-gain for outputs). The main queue turns that into a mean square per frame and smooths it with a 300 ms time constant; RMS dB = 10 log10(smoothed mean square), -120 when silent. A sine at peak P reads P - 3.01 dB.
+- With RMS on (default in the live meter; `m` toggles), a row has three zones: `█` up to the RMS level, `▒` from there up to the peak level, `░` beyond; the hold tick `┃` is unchanged. The readout becomes ` <peak> dB  rms <rms>` in the same 21 columns (the hold number is dropped because the tick shows it). Level colors apply to both numbers.
+- With RMS off, or when the frame carries no RMS data, rows are exactly the peak-only layout described above.
+- Help row gains `m rms on/off` (cut to the terminal width like every other line).
+- Testing aid: `thru meter-snapshot ... --rms <outDB,...>` supplies output RMS levels (this turns RMS rows on); `--in-rms <inDB,...>` does the same for input rows.

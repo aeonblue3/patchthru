@@ -456,3 +456,130 @@ describe.skipIf(!HW)("meter hardware", () => {
     await expectNoThruAggregates();
   }, 30_000);
 });
+
+// ---------------------------------------------------------------------------
+// RMS rows (spec: "RMS (peak + RMS bars)"). Pure: meter-snapshot only.
+// ---------------------------------------------------------------------------
+
+describe("rms rows", () => {
+  const W = 80;
+  const B = W - 36; // same bar width as the bar-length block above
+
+  const isBarRow = (l: string) => /^\s*(IN|OUT) \d+\s/.test(plain(l));
+  const barRows = (lines: string[]) => lines.filter(isBarRow);
+  const countOf = (s: string, ch: string) => [...s].filter((c) => c === ch).length;
+
+  test("without --rms no bar row mentions rms and every OUT row keeps its hold number", async () => {
+    const r = await snapshot(W, 24, "-9.3,-3.0");
+    expect(r.code).toBe(0);
+    const rows = barRows(frameLines(r.stdout));
+    expect(rows.length).toBe(2);
+    for (const row of rows) {
+      expect(plain(row)).not.toMatch(/\brms\b/);
+      expect(plain(row)).toContain("hold");
+    }
+  });
+
+  test("--rms -16,-12 after -9.3,-3.0: each OUT row shows its rms and no hold", async () => {
+    const r = await snapshot(W, 24, "-9.3,-3.0", ["--rms", "-16,-12"]);
+    expect(r.code).toBe(0);
+    const lines = frameLines(r.stdout);
+    expect(plain(findRow(lines, "OUT 1") ?? "")).toContain("rms -16.0");
+    expect(plain(findRow(lines, "OUT 2") ?? "")).toContain("rms -12.0");
+    for (const i of [1, 2]) {
+      expect(plain(findRow(lines, `OUT ${i}`) ?? "")).not.toContain("hold");
+    }
+  });
+
+  test("bar cell counts follow the rms and peak levels within one cell", async () => {
+    const r = await snapshot(W, 24, "-9.3,-3.0", ["--rms", "-16,-12"]);
+    expect(r.code).toBe(0);
+    const lines = frameLines(r.stdout);
+    const cases = [
+      { peak: -9.3, rms: -16 },
+      { peak: -3.0, rms: -12 },
+    ];
+    cases.forEach(({ peak, rms }, i) => {
+      const row = plain(findRow(lines, `OUT ${i + 1}`) ?? "");
+      const rmsCells = expectedCells(rms, B);
+      expect(Math.abs(countOf(row, "█") - rmsCells)).toBeLessThanOrEqual(1);
+      expect(Math.abs(countOf(row, "▒") - (expectedCells(peak, B) - rmsCells))).toBeLessThanOrEqual(1);
+    });
+  });
+
+  test("no █ cell sits to the right of a ▒ cell", async () => {
+    const r = await snapshot(W, 24, "-9.3,-3.0,-20", ["--rms", "-16,-12,-25"]);
+    expect(r.code).toBe(0);
+    for (const row of barRows(frameLines(r.stdout)).map(plain)) {
+      const firstLight = row.indexOf("▒");
+      if (firstLight >= 0) {
+        expect(row.lastIndexOf("█")).toBeLessThan(firstLight);
+      }
+    }
+  });
+
+  test("rms above peak: no ▒ cell and █ count matches the rms level", async () => {
+    const r = await snapshot(W, 24, "-20", ["--rms", "-10"]);
+    expect(r.code).toBe(0);
+    const row = plain(findRow(frameLines(r.stdout), "OUT 1") ?? "");
+    expect(row).not.toContain("▒");
+    expect(row).toContain("rms -10.0");
+    expect(Math.abs(countOf(row, "█") - expectedCells(-10, B))).toBeLessThanOrEqual(1);
+  });
+
+  test("--in-rms gives IN rows their rms values and OUT rows stay peak-only", async () => {
+    const r = await snapshot(W, 24, "-9.3", ["--inputs", "-5,-6", "--in-rms", "-16,-12"]);
+    expect(r.code).toBe(0);
+    const lines = frameLines(r.stdout);
+    expect(plain(findRow(lines, "IN 1") ?? "")).toContain("rms -16.0");
+    expect(plain(findRow(lines, "IN 2") ?? "")).toContain("rms -12.0");
+    expect(plain(findRow(lines, "OUT 1") ?? "")).toContain("hold");
+  });
+
+  test("without --in-rms the IN rows stay peak-only", async () => {
+    const r = await snapshot(W, 24, "-9.3", ["--inputs", "-5,-6"]);
+    expect(r.code).toBe(0);
+    const lines = frameLines(r.stdout);
+    for (const label of ["IN 1", "IN 2"]) {
+      const row = plain(findRow(lines, label) ?? "");
+      expect(row).toContain("hold");
+      expect(row).not.toMatch(/\brms\b/);
+    }
+  });
+
+  test("--color wraps the rms number in an ESC sequence and no line exceeds the width", async () => {
+    const r = await snapshot(W, 24, "-9.3,-3.0", ["--rms", "-16,-12", "--color"]);
+    expect(r.code).toBe(0);
+    const lines = frameLines(r.stdout);
+    expect(findRow(lines, "OUT 1")).toMatch(/\u001b\[[0-9;]*m\s*-16\.0/);
+    expect(findRow(lines, "OUT 2")).toMatch(/\u001b\[[0-9;]*m\s*-12\.0/);
+    for (const line of lines) {
+      expect(displayWidth(line)).toBeLessThanOrEqual(W);
+    }
+  });
+
+  test("silent rms (-70) prints rms  -inf", async () => {
+    const r = await snapshot(W, 24, "-20", ["--rms", "-70"]);
+    expect(r.code).toBe(0);
+    expect(plain(findRow(frameLines(r.stdout), "OUT 1") ?? "")).toContain("rms  -inf");
+  });
+
+  test("help row contains m rms on/off at width 80", async () => {
+    const r = await snapshot(W, 24, "-10");
+    expect(r.code).toBe(0);
+    expect(frameLines(r.stdout).some((l) => plain(l).includes("m rms on/off"))).toBe(true);
+  });
+
+  test("help row is cut, not wrapped, at width 50", async () => {
+    const r = await snapshot(50, 24, "-10");
+    expect(r.code).toBe(0);
+    const lines = frameLines(r.stdout).map(plain);
+    const help = lines.find((l) => l.includes("q quit"));
+    expect(help).toBeDefined();
+    const full = " q quit   c clear clip   i inputs on/off   m rms on/off";
+    expect(displayWidth(help ?? "")).toBeLessThanOrEqual(50);
+    expect(full.startsWith((help ?? "").trimEnd())).toBe(true);
+    expect((help ?? "").includes("m rms on/off")).toBe(false);
+    expect(lines.some((l) => l.trimStart().startsWith("ff"))).toBe(false);
+  });
+});
